@@ -15,3 +15,24 @@ Array.prototype.dropDups = function () {
             return objs.indexOf(item) >= 0 ? false : objs.push(item);
     });
 };
+
+Array.prototype.pull = function (object) {
+    return this.splice(this.indexOf(object), 1);
+};
+
+
+Array.prototype.findByAttr = function (key, value) {
+    for (var i = 0; i < this.length; i++) {
+        if (this[i][key] == value)
+            return this[i];
+    }
+    return null;
+}
+
+Array.prototype.findIdByAttr = function (key, value) {
+    for (var i = 0; i < this.length; i++) {
+        if (this[i][key] == value)
+            return i;
+    }
+    return -1;
+}
