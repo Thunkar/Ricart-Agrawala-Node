@@ -7,8 +7,8 @@ var systemLogger = winston.loggers.get("system");
 
 var getIndex = function() {
     var result = 0;
-    services.config.nodes.forEach(function(pid, index) {
-        if (pid == config.pid) {
+    services.config.nodes.forEach(function(location, index) {
+        if (location == config.location) {
             result = index;
             return;
         }
@@ -18,14 +18,16 @@ var getIndex = function() {
 
 var getParent = function() {
     var index = getIndex();
-    if (index <= 0) return null;
-    return services.config.nodes[(getIndex() - 1) / 2];
+    var parentIndex = index;
+    do
+        parentIndex = services.obj.getRandomInt(0, services.config.nodes.length - 1);
+    while (parentIndex == index);
+    return services.config.nodes[parentIndex];
 };
 
 //Client 
-var clientSocket;
 
-var client;
+var server;
 
 var configureClient = function() {
 
@@ -33,28 +35,28 @@ var configureClient = function() {
         clientSocket.destroy();
     }
 
-    clientSocket = new net.Socket();
+    var clientSocket = new net.Socket();
 
-    clientPid = getParent();
-    if (clientPid == null) return;
-    client = { socket: clientSocket, id: clientPid };
-    config.clientPort = clientPid.split(":")[1];
-    config.clientAddress = clientPid.split(":")[0];
+    var serverLocation = getParent();
+    server = { socket: clientSocket };
+    config.serverPort = serverLocation.split(":")[1];
+    config.serverAddress = serverLocation.split(":")[0];
 
-    clientSocket.connect(config.clientPort, config.clientAddress, function() {
+    clientSocket.connect(config.serverPort, config.serverAddress, function() {
         systemLogger.info("Connected to server");
+        clientSocket.write(JSON.stringify({ type: "HANDSHAKE", from: config.pid }));
     });
 
     clientSocket.on('data', function(d) {
         try {
             var data = JSON.parse(d);
         } catch (err) { }
-        systemLogger.debug(data);
-        messageProcessor.process(client, data);
+        processMessage(server, data);
     });
 
     clientSocket.on('error', function(err) {
         systemLogger.error("Lost connection with server: " + err.message);
+        configureClient();
     });
 
     clientSocket.on('end', function() {
@@ -63,12 +65,8 @@ var configureClient = function() {
     });
 }
 
-var sendUpstream = function(message, excluded) {
-    if (client.id !== excluded)
-        client.socket.write(message);
-}
-
 // Server 
+
 var clients = {};
 
 var configureServer = function() {
@@ -79,59 +77,90 @@ var configureServer = function() {
 
         systemLogger.info("Client connected");
 
-        var id = socket.remoteAddress + ":" + socket.remotePort;
-        clients[id] = { socket: socket, pid: id };
+        var client = { socket: socket };
 
         socket.on('data', function(data) {
             try {
                 data = JSON.parse(data);
-                systemLogger.debug(data);
             } catch (err) {
                 if (err) return systemLogger.error(err.message);
             }
-            messageProcessor.process(client, data);
+            processMessage(client, data);
         });
 
         socket.on('end', function() {
-            systemLogger.info("Client: " + client.id + " disconnected");
-            delete clients[client.id];
+            systemLogger.info("Client: " + client.pid + " disconnected");
+            try {
+                delete clients[client.pid];
+            } catch (err) { }
         });
 
         socket.on('error', function() {
-            systemLogger.error("Connection with client: " + client.id + " dropped");
+            systemLogger.error("Connection with client: " + client.pid + " dropped");
+            try {
+                delete clients[client.pid];
+            } catch (err) { }
         });
 
-    }).listen(config.port);
+    }).listen(process.env.PORT || config.port, function() {
+        configureClient();
+    });
 
 }
 
 var sendDownstream = function(message, excluded) {
-    for (client in clients) {
-        if (client.id !== excluded)
-            client.write(message);
-    }
+
 }
 
 // General
 
 var broadcast = function(message, excluded) {
-    if (client)
-        sendUpstream(message, excluded);
-    sendDownstream(message, excluded);
+    for (node in clients) {
+        if (node !== excluded)
+            node.socket.write(message);
+    }
+    if (server.pid != excluded)
+        server.socket.write(message);
 }
 
 
-var processMessage = function(client, data) {
-    if (message.to != "BROADCAST" && message.to != services.config.pid) {
+var status = function() {
+    var statusObject = { me: config.pid, server: server.pid, clients: [] };
+    for (node in clients) {
+        statusObject.clients.push(node);
+    }
+    return statusObject;
+}
+
+
+var processMessage = function(node, message) {
+    if (message.type != "HANDSHAKE" && message.to != config.pid) {
         systemLogger.debug("Received a message for another node, passing it along...");
-        broadcast(data, client.id);
+        broadcast(data, node.pid);
         return;
     }
     systemLogger.debug("Received a message");
+    systemLogger.debug(message);
     switch (message.type) {
-
+        case "HANDSHAKE": {
+            node.pid = message.from;
+            systemLogger.debug(status());
+            if (!server.pid || node.pid != server.pid) {
+                clients[node.pid] = node;
+            }
+            if (!message.to) {
+                node.socket.write(JSON.stringify({ type: "HANDSHAKE", from: config.pid, to: message.from }));
+            } else {
+                if (config.nodes.length > 2 && message.from == server.pid && clients[message.from]) {
+                    systemLogger.warn("Loop detected!");
+                    clients[message.from].socket.end();
+                    node.socket.end();
+                }
+            }
+            return;
+        }
         default: return;
     }
 }
 
-exports.configure = function() { configureClient(); configureServer() };
+exports.configure = function() { configureServer() };

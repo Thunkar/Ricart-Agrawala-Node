@@ -4,8 +4,9 @@ var winston = require('winston'),
 
 services.init();
 config = services.config;
-config.pid = config.address + ":" + config.port;
-
+var port = process.env.PORT || config.port;
+config.location = config.address + ":" + port;
+config.pid = services.obj.generateId();
 var systemLogger = winston.loggers.get("system");
 
 services.fileUtils.ensureExists("./logs", function(err) { if (err) systemLogger.error(err.message) });

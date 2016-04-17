@@ -13,5 +13,10 @@ var generateId = function () {
     return password;
 };
 
+var getRandomInt = function(min, max) {
+    return Math.floor(Math.random() * (max - min + 1)) + min;
+}
+
 exports.merge = merge;
 exports.generateId = generateId;
+exports.getRandomInt = getRandomInt;
