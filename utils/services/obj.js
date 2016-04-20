@@ -6,11 +6,11 @@
 
 var generateId = function () {
     var pickFrom = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789=-+#%&";
-    var password = "";
+    var id = "";
     for (var i = 0; i < 8; i++) {
-        password += pickFrom.charAt(Math.random() * 59);
+        id += pickFrom.charAt(Math.random() * 59);
     }
-    return password;
+    return id;
 };
 
 var getRandomInt = function(min, max) {

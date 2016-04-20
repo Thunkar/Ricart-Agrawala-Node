@@ -44,7 +44,7 @@ var configureClient = function() {
 
     clientSocket.connect(config.serverPort, config.serverAddress, function() {
         systemLogger.info("Connected to server");
-        clientSocket.write(JSON.stringify({ type: "HANDSHAKE", from: config.pid }));
+        clientSocket.write(JSON.stringify({ type: "HANDSHAKE", from: config.pid }) + "\r\n");
     });
 
     clientSocket.on('data', function(d) {
@@ -149,7 +149,7 @@ var processMessage = function(node, message) {
                 clients[node.pid] = node;
             }
             if (!message.to) {
-                node.socket.write(JSON.stringify({ type: "HANDSHAKE", from: config.pid, to: message.from }));
+                node.socket.write(JSON.stringify({ type: "HANDSHAKE", from: config.pid, to: message.from }) + "\r\n");
             } else {
                 if (config.nodes.length > 2 && message.from == server.pid && clients[message.from]) {
                     systemLogger.warn("Loop detected!");
