@@ -5,9 +5,9 @@ var winston = require('winston'),
 
 var systemLogger = winston.loggers.get("system");
 
-var getIndex = function() {
+var getIndex = function () {
     var result = 0;
-    services.config.nodes.forEach(function(location, index) {
+    services.config.nodes.forEach(function (location, index) {
         if (location == config.location) {
             result = index;
             return;
@@ -16,7 +16,7 @@ var getIndex = function() {
     return result;
 }
 
-var getParent = function() {
+var getParent = function () {
     var index = getIndex();
     var parentIndex = index;
     do
@@ -29,38 +29,42 @@ var getParent = function() {
 
 var server;
 
-var configureClient = function() {
-
-    if (clientSocket) {
-        clientSocket.destroy();
-    }
+var configureClient = function () {
 
     var clientSocket = new net.Socket();
+
+    clientSocket.setTimeout(1000, function () {
+        if (clientSocket.connecting) {
+            clientSocket.destroy();
+            clientSocket.end();
+            configureClient();
+        }
+    });
 
     var serverLocation = getParent();
     server = { socket: clientSocket };
     config.serverPort = serverLocation.split(":")[1];
     config.serverAddress = serverLocation.split(":")[0];
 
-    clientSocket.connect(config.serverPort, config.serverAddress, function() {
+    clientSocket.connect(config.serverPort, config.serverAddress, function () {
         systemLogger.info("Connected to server");
-        clientSocket.write(JSON.stringify({ type: "HANDSHAKE", from: config.pid }) + "\r\n");
+        clientSocket.write(JSON.stringify({ type: "HANDSHAKE", from: config.pid, timestamp: new Date() }) + "\r\n");
     });
 
-    clientSocket.on('data', function(d) {
+    clientSocket.on('data', function (d) {
         try {
             var data = JSON.parse(d);
         } catch (err) { }
         processMessage(server, data);
     });
 
-    clientSocket.on('error', function(err) {
+    clientSocket.on('error', function (err) {
         systemLogger.error("Lost connection with server: " + err.message);
         configureClient();
     });
 
-    clientSocket.on('end', function() {
-        clientSocket.destroy();
+    clientSocket.on('end', function () {
+        systemLogger.error("Connection with server dropped");
         configureClient();
     });
 }
@@ -69,17 +73,17 @@ var configureClient = function() {
 
 var clients = {};
 
-var configureServer = function() {
+var configureServer = function () {
 
     systemLogger.info("Server started");
 
-    net.createServer(function(socket) {
+    net.createServer(function (socket) {
 
         systemLogger.info("Client connected");
 
         var client = { socket: socket };
 
-        socket.on('data', function(data) {
+        socket.on('data', function (data) {
             try {
                 data = JSON.parse(data);
             } catch (err) {
@@ -88,33 +92,29 @@ var configureServer = function() {
             processMessage(client, data);
         });
 
-        socket.on('end', function() {
+        socket.on('end', function () {
             systemLogger.info("Client: " + client.pid + " disconnected");
             try {
                 delete clients[client.pid];
             } catch (err) { }
         });
 
-        socket.on('error', function() {
+        socket.on('error', function () {
             systemLogger.error("Connection with client: " + client.pid + " dropped");
             try {
                 delete clients[client.pid];
             } catch (err) { }
         });
 
-    }).listen(process.env.PORT || config.port, function() {
+    }).listen(process.env.PORT || config.port, function () {
         configureClient();
     });
 
 }
 
-var sendDownstream = function(message, excluded) {
-
-}
-
 // General
 
-var broadcast = function(message, excluded) {
+var broadcast = function (message, excluded) {
     for (node in clients) {
         if (node !== excluded)
             node.socket.write(message);
@@ -124,7 +124,7 @@ var broadcast = function(message, excluded) {
 }
 
 
-var status = function() {
+var status = function () {
     var statusObject = { me: config.pid, server: server.pid, clients: [] };
     for (node in clients) {
         statusObject.clients.push(node);
@@ -133,7 +133,7 @@ var status = function() {
 }
 
 
-var processMessage = function(node, message) {
+var processMessage = function (node, message) {
     if (message.type != "HANDSHAKE" && message.to != config.pid) {
         systemLogger.debug("Received a message for another node, passing it along...");
         broadcast(data, node.pid);
@@ -144,23 +144,27 @@ var processMessage = function(node, message) {
     switch (message.type) {
         case "HANDSHAKE": {
             node.pid = message.from;
-            systemLogger.debug(status());
-            if (!server.pid || node.pid != server.pid) {
-                clients[node.pid] = node;
-            }
-            if (!message.to) {
-                node.socket.write(JSON.stringify({ type: "HANDSHAKE", from: config.pid, to: message.from }) + "\r\n");
+            if (config.nodes.length > 2 && message.from == server.pid) {
+                systemLogger.warn("Loop detected");
+                node.socket.end();
             } else {
-                if (config.nodes.length > 2 && message.from == server.pid && clients[message.from]) {
-                    systemLogger.warn("Loop detected!");
-                    clients[message.from].socket.end();
-                    node.socket.end();
-                }
+                clients[node.pid] = node;
+                node.socket.write(JSON.stringify({ type: "ACKHANDSHAKE", from: config.pid, to: message.from, timestamp: new Date() }) + "\r\n");
             }
-            return;
+            break;
         }
-        default: return;
+        case "ACKHANDSHAKE": {
+            if (config.nodes.length > 2 && clients[message.from]) {
+                systemLogger.warn("Loop detected");
+                server.socket.end();
+            } else {
+                server.pid = message.from;
+            }
+            break;
+        }
+        default: break;
     }
+    systemLogger.debug(status());
 }
 
-exports.configure = function() { configureServer() };
+exports.configure = function () { configureServer() };
