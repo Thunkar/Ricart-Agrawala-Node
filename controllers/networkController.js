@@ -25,6 +25,10 @@ var getParent = function () {
     return services.config.nodes[parentIndex];
 };
 
+var pendingElection = true;
+var timers = [];
+var coordinator = "-1";
+
 //Client 
 
 var server;
@@ -48,7 +52,7 @@ var configureClient = function () {
 
     clientSocket.connect(config.serverPort, config.serverAddress, function () {
         systemLogger.info("Connected to server");
-        clientSocket.write(JSON.stringify({ type: "HANDSHAKE", from: config.pid, timestamp: new Date() }) + "\r\n");
+        clientSocket.write(JSON.stringify({ type: "HANDSHAKE", from: config.pid, timestamp: new Date(), ttl: 1 }) + "\r\n");
     });
 
     clientSocket.on('data', function (d) {
@@ -85,11 +89,15 @@ var configureServer = function () {
 
         socket.on('data', function (data) {
             try {
-                data = JSON.parse(data);
+                var splitted = data.toString().split("\r\n");
+                splitted.forEach(function (message) {
+                    if (!message || message == "") return;
+                    var json = JSON.parse(message);
+                    processMessage(client, json);
+                });
             } catch (err) {
                 if (err) return systemLogger.error(err.message);
             }
-            processMessage(client, data);
         });
 
         socket.on('end', function () {
@@ -97,6 +105,7 @@ var configureServer = function () {
             try {
                 delete clients[client.pid];
             } catch (err) { }
+            election();
         });
 
         socket.on('error', function () {
@@ -104,6 +113,7 @@ var configureServer = function () {
             try {
                 delete clients[client.pid];
             } catch (err) { }
+            election();
         });
 
     }).listen(process.env.PORT || config.port, function () {
@@ -114,52 +124,100 @@ var configureServer = function () {
 
 // General
 
-var broadcast = function (message, excluded) {
-    for (node in clients) {
-        if (node !== excluded)
-            node.socket.write(message);
+var send = function (message, excluded) {
+    for (pid in clients) {
+        var node = clients[pid];
+        if (pid !== excluded) {
+            node.socket.write(JSON.stringify(message) + "\r\n");
+        }
     }
-    if (server.pid != excluded)
-        server.socket.write(message);
+    if (server.pid !== excluded) {
+        server.socket.write(JSON.stringify(message) + "\r\n");
+    }
 }
 
 
 var status = function () {
-    var statusObject = { me: config.pid, server: server.pid, clients: [] };
+    var statusObject = { me: config.pid, server: server.pid, coordinator: coordinator, clients: [] };
     for (node in clients) {
         statusObject.clients.push(node);
     }
     return statusObject;
 }
 
+var election = function () {
+    systemLogger.info("Starting election");
+    coordinator = "-1";
+    pendingElection = true;
+    timers.forEach(function (timer) {
+        clearTimeout(timer);
+    });
+    for (var i = 0; i < config.pid; i++) {
+        send({ type: "ELECTION", from: config.pid, to: i + "", timestamp: new Date(), ttl: config.nodes.length })
+    }
+    timers.push(setTimeout(function () {
+        if (!pendingElection) return;
+        send({ type: "COORDINATOR", from: config.pid, to: "-1", timestamp: new Date(), ttl: config.nodes.length });
+        pendingElection = false;
+        coordinator = config.pid;
+        systemLogger.info("No one answered, I'm the coordinator");
+    }, config.electionTimeout))
+}
+
 
 var processMessage = function (node, message) {
+    if (!message || message.from == config.pid || message.ttl < 1) return;
+    else message.ttl--;
+    systemLogger.debug(message);
     if (message.type != "HANDSHAKE" && message.to != config.pid) {
         systemLogger.debug("Received a message for another node, passing it along...");
-        broadcast(data, node.pid);
-        return;
+        send(message, node.pid);
+        if (message.to != "-1")
+            return;
     }
-    systemLogger.debug("Received a message");
-    systemLogger.debug(message);
     switch (message.type) {
         case "HANDSHAKE": {
             node.pid = message.from;
             if (config.nodes.length > 2 && message.from == server.pid) {
                 systemLogger.warn("Loop detected");
                 node.socket.end();
+                server.socket.end();
             } else {
                 clients[node.pid] = node;
-                node.socket.write(JSON.stringify({ type: "ACKHANDSHAKE", from: config.pid, to: message.from, timestamp: new Date() }) + "\r\n");
+                node.socket.write(JSON.stringify({ type: "ACKHANDSHAKE", from: config.pid, to: message.from, timestamp: new Date(), ttl: 1 }) + "\r\n");
             }
             break;
         }
         case "ACKHANDSHAKE": {
             if (config.nodes.length > 2 && clients[message.from]) {
-                systemLogger.warn("Loop detected");
+                systemLogger.warn("Server loop detected");
                 server.socket.end();
+                node.socket.end();
             } else {
                 server.pid = message.from;
+                election();
             }
+            break;
+        }
+        case "ELECTION": {
+            if (pendingElection) return;
+            send({ type: "ANSWER", from: config.pid, to: message.from, timestamp: new Date(), ttl: config.nodes.length });
+            election();
+            break;
+        }
+        case "ANSWER": {
+            systemLogger.info("Received answer, stepping down");
+            pendingElection = false;
+            break;
+        }
+        case "COORDINATOR": {
+            if (message.from > config.pid) {
+                election();
+                return;
+            }
+            systemLogger.info("Node: " + message.from + " is the coordinator");
+            coordinator = message.from;
+            pendingElection = false;
             break;
         }
         default: break;
